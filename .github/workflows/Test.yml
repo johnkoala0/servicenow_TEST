@@ -1,46 +1,70 @@
 name: Test
-
 on:
   workflow_dispatch:
-    
+
 jobs:
-
-  build:
-    name: Build
+  test:
+    name: Build and Get ServiceNow Change
     runs-on: ubuntu-latest
-  
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Set Node.js 14.x
-      uses: actions/setup-node@v3
-      with:
-        node-version: 14.x
-
-    - name: Install dependencies
-      run: npm ci
-
-    - name: Compile
-      run: npm run build
-
-  GetChangeDetails:
-    needs: build
-    runs-on: ubuntu-latest
-    name: Servicenow Get Change Details
+    timeout-minutes: 15  # Scalable: Évite hangs en CI long
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
-      - name: Servicenow Get Change Details
-        uses: ServiceNow/servicenow-devops-get-change@2.0.0
+        uses: actions/checkout@v4  # Updaté: Meilleure perf, shallow par défaut
+
+      - name: Set Node.js 20.x
+        uses: actions/setup-node@v4  # Updaté: Support npm 10+, cache auto
+        with:
+          node-version: 20.x
+          cache: 'npm'  # Optimise: Cache deps pour runs suivants
+
+      - name: Install dependencies
+        run: |
+          # Debug: Vérifie structure repo pour root cause exit 254
+          set -euo pipefail  # Fail-fast, no undef vars
+          echo "Current dir: $(pwd)"
+          ls -la  # Vérifie package.json existe
+          if [ ! -f package.json ]; then
+            echo "Error: No package.json at root – add it or check path"
+            exit 1
+          fi
+          cat package.json | grep -A5 '"scripts"'  # Montre scripts (incl. build)
+          npm ci --frozen-lockfile  # Reproductible, fail si lock mismatch
+
+      - name: Compile
+        run: |
+          # Debug: Trace build pour éviter silent 254
+          set -euo pipefail
+          echo "Npm version: $(npm --version)"
+          if ! npm run build --if-present; then
+            echo "Build failed: Check package.json scripts or deps"
+            npm run build --dry-run || true  # Simulate sans exec pour diag
+            exit 1
+          fi
+        # Continue si fail pour post-mortem, mais fail job global
+
+      - name: ServiceNow Get Change Details
         id: get
+        uses: ServiceNow/servicenow-devops-get-change@2.0.0
         with:
           devops-integration-user-name: ${{ secrets.SN_DEVOPS_USER }}
           devops-integration-user-password: ${{ secrets.SN_DEVOPS_PASSWORD }}
           instance-url: ${{ secrets.SN_INSTANCE_URL }}
           context-github: ${{ toJSON(github) }}
           tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
-          change-details: '{"pipeline_name":"maheshganji/custom-action-get/CustomActionGetWorkflow","stage_name":"ServiceNow Change Approval","build_number":"3732116819"}'
+          change-details: >-
+            { 
+              "number": "${{ github.repository }}",
+              "stage_name": "ServiceNow Change Approval",
+              "build_number": "${{ github.run_number }}"
+            }
+
       - name: Output of GetChangeDetails
-        run: echo "The Status of Update Change Request Details => ${{ steps.get.outputs.change-request-number }}"
+        run: |
+          echo "The Status of Update Change Request Details => ${{ steps.get.outputs.change-request-number }}"
+          # Scalable: Sauvegarde pour artifacts ou next steps
+          echo "change_number=${{ steps.get.outputs.change-request-number }}" >> $GITHUB_OUTPUT
+
+    # Outputs job pour chaining (e.g., update-change next)
+    outputs:
+      change-number: ${{ steps.get.outputs.change-request-number }}
